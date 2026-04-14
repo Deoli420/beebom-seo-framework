@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  seo-tests:
+    build: .
+    volumes:
+      - ./reports:/app/reports
+      - ./results.db:/app/results.db
+    environment:
+      - BASE_URL=https://beebom.com
+    env_file:
+      - .env

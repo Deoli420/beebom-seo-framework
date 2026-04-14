@@ -1,0 +1,159 @@
+"""
+HTML email reporter for Beebom SEO test results.
+
+Sends a colour-coded HTML email with run summary, failed-test details,
+and a trend comparison against the last 5 runs.
+"""
+
+import logging
+import os
+import smtplib
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from dotenv import load_dotenv
+
+from utils.db_logger import get_last_5_runs, get_failing_tests
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+
+def _build_html(total: int, passed: int, failed: int) -> str:
+    """Build the HTML body for the email report.
+
+    Args:
+        total: Total tests in the current run.
+        passed: Passed count.
+        failed: Failed count.
+
+    Returns:
+        A complete HTML string ready for MIMEText.
+    """
+    pass_rate = (passed / total * 100) if total else 0
+    colour = "#27ae60" if pass_rate >= 90 else "#e67e22" if pass_rate >= 70 else "#e74c3c"
+
+    # Trend rows
+    runs = get_last_5_runs()
+    trend_rows = ""
+    for r in runs:
+        r_rate = (r["passed"] / r["total_tests"] * 100) if r["total_tests"] else 0
+        r_colour = "#27ae60" if r_rate >= 90 else "#e67e22" if r_rate >= 70 else "#e74c3c"
+        trend_rows += (
+            f'<tr>'
+            f'<td style="padding:6px;border:1px solid #ddd">{r["run_date"][:19]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd">{r["total_tests"]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;color:#27ae60">{r["passed"]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;color:#e74c3c">{r["failed"]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;color:{r_colour};font-weight:bold">'
+            f'{r_rate:.1f}%</td></tr>'
+        )
+
+    # Failed tests rows
+    failures = get_failing_tests()
+    fail_rows = ""
+    for f in failures[:20]:
+        fail_rows += (
+            f'<tr>'
+            f'<td style="padding:6px;border:1px solid #ddd;font-size:12px">{f["url"][:60]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;font-size:12px">{f["test_name"][:80]}</td>'
+            f'<td style="padding:6px;border:1px solid #ddd;font-size:12px;color:#e74c3c">'
+            f'{f["error_msg"][:120]}</td></tr>'
+        )
+
+    html = f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;margin:20px;color:#333">
+        <h1 style="color:{colour}">Beebom SEO Report</h1>
+        <p style="font-size:14px;color:#666">{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
+
+        <h2>Run Summary</h2>
+        <table style="border-collapse:collapse;margin-bottom:20px">
+            <tr>
+                <td style="padding:10px;background:#f7f7f7;border:1px solid #ddd"><strong>Total Tests</strong></td>
+                <td style="padding:10px;border:1px solid #ddd">{total}</td>
+            </tr>
+            <tr>
+                <td style="padding:10px;background:#f7f7f7;border:1px solid #ddd"><strong>Passed</strong></td>
+                <td style="padding:10px;border:1px solid #ddd;color:#27ae60;font-weight:bold">{passed}</td>
+            </tr>
+            <tr>
+                <td style="padding:10px;background:#f7f7f7;border:1px solid #ddd"><strong>Failed</strong></td>
+                <td style="padding:10px;border:1px solid #ddd;color:#e74c3c;font-weight:bold">{failed}</td>
+            </tr>
+            <tr>
+                <td style="padding:10px;background:#f7f7f7;border:1px solid #ddd"><strong>Pass Rate</strong></td>
+                <td style="padding:10px;border:1px solid #ddd;color:{colour};font-weight:bold">
+                    {pass_rate:.1f}%</td>
+            </tr>
+        </table>
+
+        <h2>Failed Tests</h2>
+        {'<p style="color:#27ae60">All tests passed!</p>' if not fail_rows else f"""
+        <table style="border-collapse:collapse;width:100%;margin-bottom:20px">
+            <tr style="background:#f7f7f7">
+                <th style="padding:8px;border:1px solid #ddd;text-align:left">URL</th>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left">Test</th>
+                <th style="padding:8px;border:1px solid #ddd;text-align:left">Error</th>
+            </tr>
+            {fail_rows}
+        </table>"""}
+
+        <h2>Trend (Last 5 Runs)</h2>
+        <table style="border-collapse:collapse;width:100%;margin-bottom:20px">
+            <tr style="background:#f7f7f7">
+                <th style="padding:8px;border:1px solid #ddd;text-align:left">Date</th>
+                <th style="padding:8px;border:1px solid #ddd">Total</th>
+                <th style="padding:8px;border:1px solid #ddd">Passed</th>
+                <th style="padding:8px;border:1px solid #ddd">Failed</th>
+                <th style="padding:8px;border:1px solid #ddd">Pass Rate</th>
+            </tr>
+            {trend_rows}
+        </table>
+
+        <p style="font-size:12px;color:#999">
+            Generated by Beebom SEO Framework &mdash; view full Allure report in CI artifacts.
+        </p>
+    </body>
+    </html>
+    """
+    return html
+
+
+def send_report(total: int, passed: int, failed: int) -> None:
+    """Compose and send the HTML email report via Gmail SMTP.
+
+    Args:
+        total: Total tests executed.
+        passed: Number passed.
+        failed: Number failed.
+    """
+    smtp_email = os.getenv("SMTP_EMAIL")
+    smtp_password = os.getenv("SMTP_PASSWORD")
+    recipients_raw = os.getenv("REPORT_RECIPIENTS", "")
+
+    if not smtp_email or not smtp_password or not recipients_raw:
+        logger.warning("Email credentials not configured — skipping report email.")
+        return
+
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    pass_rate = (passed / total * 100) if total else 0
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Beebom SEO Report — {date_str} — {pass_rate:.0f}% Pass Rate"
+    msg["From"] = smtp_email
+    msg["To"] = ", ".join(recipients)
+
+    html_body = _build_html(total, passed, failed)
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(smtp_email, smtp_password)
+            server.sendmail(smtp_email, recipients, msg.as_string())
+        logger.info("Email report sent to %s", recipients)
+    except Exception as exc:
+        logger.error("Failed to send email report: %s", exc)

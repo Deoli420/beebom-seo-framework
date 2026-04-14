@@ -1,0 +1,79 @@
+name: Nightly SEO Tests
+
+on:
+  schedule:
+    # 5:30 PM UTC = 11:00 PM IST
+    - cron: "30 17 * * *"
+  workflow_dispatch:  # Manual trigger
+
+env:
+  BASE_URL: ${{ secrets.BASE_URL }}
+  SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+  SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+  REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+
+jobs:
+  seo-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run SEO tests
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --alluredir=reports/allure-results \
+            || true  # Don't fail the workflow on test failures
+
+      - name: Generate Allure HTML report
+        if: always()
+        uses: simple-elf/allure-report-action@v1.7
+        with:
+          allure_results: reports/allure-results
+          allure_report: reports/allure-report
+
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: reports/allure-report
+          retention-days: 30
+
+      - name: Upload screenshots (on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-screenshots
+          path: reports/screenshots/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Send email report
+        if: always()
+        run: |
+          python -c "
+          from utils.db_logger import get_last_5_runs
+          from utils.email_reporter import send_report
+          runs = get_last_5_runs()
+          if runs:
+              r = runs[0]
+              send_report(r['total_tests'], r['passed'], r['failed'])
+          else:
+              print('No run data found — skipping email')
+          "
