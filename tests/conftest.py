@@ -129,8 +129,14 @@ def pytest_runtest_makereport(item, call):
         if report.failed:
             page_fixture = item.funcargs.get("page") or item.funcargs.get("mobile_page")
             if page_fixture:
-                screenshot_name = f"{item.nodeid.replace('/', '_').replace('::', '_')}.png"
-                screenshot_path = SCREENSHOT_DIR / screenshot_name
+                # Sanitize nodeid — strip characters invalid on Windows/NTFS/GitHub artifacts:
+                #   : " < > | * ? \r \n / \
+                # This keeps names stable and portable across runners.
+                import re
+                safe_name = re.sub(r'[:"<>|*?\r\n/\\]+', "_", item.nodeid)
+                # Collapse repeated underscores and trim length.
+                safe_name = re.sub(r"_+", "_", safe_name).strip("_")[:180]
+                screenshot_path = SCREENSHOT_DIR / f"{safe_name}.png"
                 try:
                     page_fixture.screenshot(path=str(screenshot_path))
                     allure.attach.file(
