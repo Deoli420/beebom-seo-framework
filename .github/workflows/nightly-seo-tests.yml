@@ -7,15 +7,16 @@ on:
   workflow_dispatch:  # Manual trigger
 
 env:
-  BASE_URL: ${{ secrets.BASE_URL }}
+  BASE_URL: ${{ secrets.BASE_URL || 'https://beebom.com' }}
   SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
   SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
   REPORT_RECIPIENTS: ${{ secrets.REPORT_RECIPIENTS }}
+  HEADLESS: "true"
 
 jobs:
   seo-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code
@@ -25,27 +26,58 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('requirements.txt') }}
 
       - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: playwright install --with-deps chromium
 
+      - name: Install Playwright system deps (when cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
       - name: Run SEO tests
+        id: pytest
+        continue-on-error: true
         run: |
+          mkdir -p reports/allure-results reports/screenshots
           pytest tests/ \
             -v \
             --tb=short \
-            --alluredir=reports/allure-results \
-            || true  # Don't fail the workflow on test failures
+            --alluredir=reports/allure-results
+
+      - name: Install Allure CLI
+        if: always()
+        run: |
+          ALLURE_VERSION=2.27.0
+          wget -qO /tmp/allure.tgz \
+            "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.tgz"
+          sudo tar -xzf /tmp/allure.tgz -C /opt/
+          sudo ln -sf "/opt/allure-${ALLURE_VERSION}/bin/allure" /usr/local/bin/allure
+          allure --version
 
       - name: Generate Allure HTML report
         if: always()
-        uses: simple-elf/allure-report-action@v1.7
-        with:
-          allure_results: reports/allure-results
-          allure_report: reports/allure-report
+        run: |
+          if [ -d reports/allure-results ] && [ -n "$(ls -A reports/allure-results 2>/dev/null)" ]; then
+            allure generate reports/allure-results --clean -o reports/allure-report
+          else
+            echo "No allure results found — skipping report generation"
+            mkdir -p reports/allure-report
+            echo "<html><body><h1>No test results</h1></body></html>" > reports/allure-report/index.html
+          fi
 
       - name: Upload Allure report
         if: always()
@@ -54,8 +86,18 @@ jobs:
           name: allure-report
           path: reports/allure-report
           retention-days: 30
+          if-no-files-found: warn
 
-      - name: Upload screenshots (on failure)
+      - name: Upload raw Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: reports/allure-results
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload failure screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -64,8 +106,17 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: Send email report
+      - name: Upload results database
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-db
+          path: results.db
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Send email report
+        if: always() && env.SMTP_EMAIL != ''
         run: |
           python -c "
           from utils.db_logger import get_last_5_runs
@@ -74,6 +125,16 @@ jobs:
           if runs:
               r = runs[0]
               send_report(r['total_tests'], r['passed'], r['failed'])
+              print(f'Email sent — total={r[\"total_tests\"]} passed={r[\"passed\"]} failed={r[\"failed\"]}')
           else:
               print('No run data found — skipping email')
           "
+
+      - name: Report test outcome
+        if: always()
+        run: |
+          if [ "${{ steps.pytest.outcome }}" = "success" ]; then
+            echo "::notice::All SEO tests passed"
+          else
+            echo "::warning::Some SEO tests failed — see Allure report artifact"
+          fi
